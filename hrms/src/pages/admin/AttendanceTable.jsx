@@ -1,0 +1,89 @@
+import React from 'react';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+
+export const AttendanceTable = ({
+  filteredAttendance,
+  loading,
+  format12h,
+  calculateHours,
+  handleUpdateStatus,
+  setSelectedRecord,
+  setIsDetailModalOpen,
+  updateLoading,
+  totalRecords = 0,
+}) => {
+  if (loading) {
+    return (
+      <>
+        <tr>
+          <td colSpan={7} className="p-12 text-center text-muted-foreground">
+            <div className="mx-auto animate-spin mb-2">Loading...</div>
+          </td>
+        </tr>
+      </>
+    );    
+  }
+
+  if (filteredAttendance.length === 0) {
+    return (
+      <>
+        <tr>
+          <td colSpan={7} className="p-12 text-center">
+            {totalRecords > 0 ? (
+              <div className="space-y-3">
+                <div className="text-amber-600 font-semibold text-lg">⚠️ No records match your current filters</div>
+                <div className="text-muted-foreground text-sm">
+                  {totalRecords} attendance record(s) exist, but none match the selected <strong>Month/Year</strong> filter.
+                </div>
+                <div className="text-sm text-muted-foreground bg-amber-50 border border-amber-200 rounded-lg p-4 max-w-md mx-auto">
+                  <strong>💡 Tip:</strong> Try changing the <strong>Month</strong> and <strong>Year</strong> dropdowns at the top of the page to see older records.
+                </div>
+              </div>
+            ) : (
+              <div className="text-muted-foreground">No attendance records found.</div>
+            )}
+          </td>
+        </tr>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {filteredAttendance.map((record, index) => (
+        <tr key={record._id || index} className={`hover:bg-muted/30 transition-colors ${record.userId?.status === 'Deleted' ? 'line-through opacity-50 bg-muted/20' : ''}`}>
+          <td className="px-6 py-4 font-medium">{record.date}</td>
+          <td className="px-6 py-4">
+            <div className="flex flex-col">
+              <span className="font-bold text-slate-900">
+                {record.userId?.name || 'Unknown'}
+                {record.userId?.status === 'Deleted' && (
+                  <span className="text-rose-500 text-xs ml-2 font-semibold">(Deleted)</span>
+                )}
+              </span>
+              <span className="text-xs text-muted-foreground">{record.userId?.employeeId}</span>
+            </div>
+          </td>
+          <td className="px-6 py-4 text-muted-foreground font-medium">{format12h(record.checkIn)}</td>
+          <td className="px-6 py-4 text-muted-foreground font-medium">{format12h(record.checkOut)}</td>
+          <td className="px-6 py-4 font-bold text-primary">{calculateHours(record.duration)}</td>
+          <td className="px-6 py-4 text-center">
+            <Badge variant={(record.checkIn && !record.checkOut) ? 'destructive' : record.status === 'Present' ? 'success' : record.status === 'Late' ? 'warning' : 'destructive'}>
+              {(record.checkIn && !record.checkOut) ? 'Missed Checkout' : record.status}
+            </Badge>
+          </td>
+          <td className="px-6 py-4 text-right">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setSelectedRecord(record); setIsDetailModalOpen(true); }}
+            >
+              Details
+            </Button>
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+};

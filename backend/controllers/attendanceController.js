@@ -1,0 +1,1157 @@
+const Attendance = require('../models/Attendance');
+const User = require('../models/User');
+const OfficeSettings = require('../models/OfficeSettings');
+const { formatInTimeZone } = require('date-fns-tz');
+const { sendDailyReport } = require('../utils/reportCron');
+const { getClientIp, isPrivateIp } = require('./managerController');
+
+/**
+ * IP Restriction Check Helper
+ * Returns { allowed: true } or { allowed: false, message: string }
+ *
+ * Rules:
+ *  - If IP restriction is disabled for the tenant → always allowed
+ *  - If no officeIp stored yet → allowed (not configured)
+ *  - Admin users are always allowed (they can bypass)
+ *  - If request IP matches stored office IP → allowed
+ *  - Otherwise → denied with a clear message
+ */
+const checkIpRestriction = async (req) => {
+    try {
+        const user = req.user;
+        // Admins always bypass IP restriction
+        if (user.role === 'Admin') return { allowed: true };
+
+        const adminRecord = await User.findById(user.adminId)
+            .select('ipRestrictionEnabled officeIp officeIpUpdatedAt');
+
+        if (!adminRecord) return { allowed: true }; // Can't find admin → don't block
+        
+        if (!adminRecord.ipRestrictionEnabled) {
+            console.log(`ℹ️ IP restriction disabled for tenant ${user.adminId} - allowing all IPs`);
+            return { allowed: true }; // Feature disabled
+        }
+        
+        if (!adminRecord.officeIp) {
+            console.log(`⚠️ No office IP set for tenant ${user.adminId} - allowing all IPs`);
+            return { allowed: true }; // No IP set yet → don't block
+        }
+
+        const requestIp = getClientIp(req);
+        console.log(`🔍 IP Check: Request IP="${requestIp}", Office IP="${adminRecord.officeIp}", User="${user.name}"`);
+        
+        if (requestIp === adminRecord.officeIp) {
+            console.log(`✅ IP check passed - allowing attendance`);
+            return { allowed: true };
+        }
+
+        // Format the last update time nicely
+        const lastUpdated = adminRecord.officeIpUpdatedAt
+            ? new Date(adminRecord.officeIpUpdatedAt).toLocaleString('en-PK', {
+                  timeZone: 'Asia/Karachi',
+                  dateStyle: 'medium',
+                  timeStyle: 'short',
+              })
+            : 'unknown time';
+
+        console.log(`❌ IP check failed - blocking attendance (mismatch: ${requestIp} !== ${adminRecord.officeIp})`);
+        
+        return {
+            allowed: false,
+            message: `Attendance can only be marked from the office network. Your IP (${requestIp}) does not match the registered office IP. Office IP was last updated: ${lastUpdated}.`,
+        };
+    } catch (err) {
+        console.error('IP restriction check error:', err);
+        return { allowed: true }; // On error, fail open (don't block attendance)
+    }
+};
+
+// @desc    Manually trigger daily report email (Admin)
+// @route   POST /api/attendance/report/send
+// @access  Private/Admin
+const triggerManualReport = async (req, res) => {
+    try {
+        await sendDailyReport();
+        res.json({ message: 'Daily report email triggered successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to send report', error: error.message });
+    }
+};
+
+
+// Helper to get current PKT time
+const getPKTTime = (date = new Date()) => {
+    // If date is a string and doesn't contain timezone info, assume it's PKT
+    if (typeof date === 'string' && !date.includes('Z') && !date.includes('+') && !date.includes('-')) {
+        // Append PKT offset (+05:00)
+        date = date + '+05:00';
+    }
+    return new Date(formatInTimeZone(new Date(date), 'Asia/Karachi', "yyyy-MM-dd'T'HH:mm:ssXXX"));
+};
+
+const getPKTDateString = (date = new Date()) => {
+    return formatInTimeZone(date, 'Asia/Karachi', 'yyyy-MM-dd');
+};
+
+// Helper to format 24h to 12h AM/PM
+const format12h = (time24) => {
+    if (!time24) return '';
+    const [hours, minutes] = time24.split(':');
+    const h = parseInt(hours);
+    const m = minutes;
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return `${h12}:${m} ${ampm}`;
+};
+
+/**
+ * Shift timing enforcement helper.
+ * @param {object} user - User document with shiftStart, shiftEnd, lateGraceMinutes
+ * @param {Date}   pktNow - Current PKT time
+ * @returns {{ allowed: boolean, status: string, message: string, minutesLate: number }}
+ *
+ * Rules:
+ *  - If user has no shiftStart set → always allowed (no restriction)
+ *  - If current time < shiftStart → BLOCKED (too early)
+ *  - If current time <= shiftStart + lateGraceMinutes → Present (on time)
+ *  - If current time > shiftStart + lateGraceMinutes → Late
+ */
+const checkShiftTiming = (user, pktNow) => {
+    const shiftStart = user.shiftStart || '09:00';
+    const graceMinutes = user.lateGraceMinutes !== undefined ? user.lateGraceMinutes : 15;
+
+    // Parse shiftStart into hours and minutes
+    const [shiftH, shiftM] = shiftStart.split(':').map(Number);
+
+    // Build a Date for shiftStart TODAY in PKT
+    const shiftStartDate = new Date(pktNow);
+    shiftStartDate.setHours(shiftH, shiftM, 0, 0);
+
+    // Compute difference in minutes (positive = pktNow is after shiftStart)
+    const diffMs = pktNow - shiftStartDate;
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+
+    if (diffMinutes < 0) {
+        // Early — before shift start (now allowed)
+        return {
+            allowed: true,
+            status: 'Present',
+            minutesLate: 0,
+            message: `Checked in early (shift starts at ${format12h(shiftStart)}).`,
+        };
+    }
+
+    if (diffMinutes > graceMinutes) {
+        // Late
+        return {
+            allowed: true,
+            status: 'Late',
+            minutesLate: diffMinutes,
+            message: `Marked as Late — ${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} after shift start (${format12h(shiftStart)}).`,
+        };
+    }
+
+    // On time (within grace period)
+    return {
+        allowed: true,
+        status: 'Present',
+        minutesLate: 0,
+        message: 'Checked in on time.',
+    };
+};
+
+// @desc    Reconcile missing attendance records (Automated Absent tracking)
+const reconcileAttendance = async (userId) => {
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const pktNow = getPKTTime();
+    const todayStr = getPKTDateString(pktNow);
+
+    // Start from joinDate to yesterday
+    let current = new Date(user.joinDate || user.createdAt);
+    if (isNaN(current.getTime())) {
+        current = new Date(user.createdAt);
+    }
+
+    const yesterday = new Date(pktNow);
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+
+    const yesterdayStr = getPKTDateString(yesterday);
+
+    if (current > yesterday) return;
+
+    try {
+        // 1. Fetch all existing attendance records for this user in bulk
+        const existingRecords = await Attendance.find({
+            userId,
+            date: { $lte: yesterdayStr }
+        }).select('date status isAutoLeave');
+
+        const recordMap = new Map(existingRecords.map(r => [r.date, r]));
+
+        const newRecords = [];
+
+        const userOffDays = (user.offDays && user.offDays.length > 0) ? user.offDays : [5]; // Default Friday
+        while (current <= yesterday) {
+            const dateStr = getPKTDateString(current);
+            const dayOfWeek = current.getDay();
+
+            if (!recordMap.has(dateStr)) {
+                if (!userOffDays.includes(dayOfWeek) && !(user.vacations && user.vacations.includes(dateStr))) {
+                    newRecords.push({
+                        userId,
+                        date: dateStr,
+                        status: 'Absent',
+                        adminId: user.adminId
+                    });
+                }
+            }
+            current.setDate(current.getDate() + 1);
+        }
+
+        if (newRecords.length > 0) {
+            await Attendance.insertMany(newRecords);
+        }
+    } catch (error) {
+        console.error('Error in reconcileAttendance:', error);
+    }
+};
+
+// @desc    Reconcile missing attendance records for multiple users in bulk
+const reconcileMultipleUsersAttendance = async (users) => {
+    if (!users || users.length === 0) return;
+
+    const pktNow = getPKTTime();
+    const todayStr = getPKTDateString(pktNow);
+
+    const yesterday = new Date(pktNow);
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+
+    const yesterdayStr = getPKTDateString(yesterday);
+
+    try {
+        const userIds = users.map(u => u._id);
+        const existingRecords = await Attendance.find({
+            userId: { $in: userIds },
+            date: { $lte: yesterdayStr }
+        }).select('userId date status isAutoLeave');
+
+        // Group by user ID
+        const recordsByUser = {};
+        for (const r of existingRecords) {
+            const uid = r.userId.toString();
+            if (!recordsByUser[uid]) recordsByUser[uid] = new Set();
+            recordsByUser[uid].add(r.date);
+        }
+
+        const newRecords = [];
+
+        for (const user of users) {
+            let current = new Date(user.joinDate || user.createdAt);
+            if (isNaN(current.getTime())) {
+                current = new Date(user.createdAt);
+            }
+
+            if (current > yesterday) continue;
+
+            const userOffDays = (user.offDays && user.offDays.length > 0) ? user.offDays : [5];
+            const userSet = recordsByUser[user._id.toString()] || new Set();
+
+            while (current <= yesterday) {
+                const dateStr = getPKTDateString(current);
+                const dayOfWeek = current.getDay();
+
+                if (!userSet.has(dateStr)) {
+                    if (!userOffDays.includes(dayOfWeek) && !(user.vacations && user.vacations.includes(dateStr))) {
+                        newRecords.push({
+                            userId: user._id,
+                            date: dateStr,
+                            status: 'Absent',
+                            adminId: user.adminId
+                        });
+                    }
+                }
+                current.setDate(current.getDate() + 1);
+            }
+        }
+
+        if (newRecords.length > 0) {
+            await Attendance.insertMany(newRecords);
+        }
+    } catch (error) {
+        console.error('Error in reconcileMultipleUsersAttendance:', error);
+    }
+};
+
+// @desc    Check In
+// @route   POST /api/attendance/checkin
+// @access  Private
+const checkIn = async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (user.status === 'Deleted') return res.status(400).json({ message: 'Deleted users cannot mark attendance' });
+
+        // ── IP restriction check ──────────────────────────────────
+        const ipCheck = await checkIpRestriction(req);
+        if (!ipCheck.allowed) {
+            return res.status(403).json({ message: ipCheck.message, code: 'IP_RESTRICTED' });
+        }
+
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+
+        // ── Shift timing enforcement ──────────────────────────────
+        const shiftCheck = checkShiftTiming(user, pktNow);
+        if (!shiftCheck.allowed) {
+            return res.status(403).json({
+                message: shiftCheck.message,
+                code: 'TOO_EARLY',
+                shiftStart: user.shiftStart || '09:00'
+            });
+        }
+
+        // Office IP Validation
+        const settings = await OfficeSettings.findOne({ adminId: user.adminId });
+        if (settings && settings.currentIp) {
+            let clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+            if (clientIp && clientIp.includes(',')) {
+                clientIp = clientIp.split(',')[0].trim();
+            }
+            if (clientIp !== settings.currentIp) {
+                return res.status(403).json({ message: 'You must be connected to the office network to mark attendance.' });
+            }
+        }
+
+        // Check if already checked in today
+        let attendance = await Attendance.findOne({ userId, date: dateStr });
+        if (attendance && attendance.checkOut) {
+            return res.status(400).json({ message: 'You have already checked out for today. See you tomorrow!' });
+        }
+        if (attendance && attendance.checkIn) {
+            return res.status(400).json({ message: 'Already checked in today' });
+        }
+
+        // Determine status — Present or Late
+        const status = shiftCheck.status; // 'Present' or 'Late'
+
+        if (!attendance) {
+            attendance = new Attendance({
+                userId,
+                date: dateStr,
+                checkIn: pktNow,
+                status,
+                adminId: req.adminId
+            });
+        } else {
+            attendance.checkIn = pktNow;
+            attendance.status = status;
+        }
+
+        await attendance.save();
+
+        const responseMsg = status === 'Late'
+            ? `Checked in — ${shiftCheck.message}`
+            : 'Check in successfully';
+
+        res.status(201).json({
+            message: responseMsg,
+            status,
+            minutesLate: shiftCheck.minutesLate,
+            attendance
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Check Out
+// @route   POST /api/attendance/checkout
+// @access  Private
+const checkOut = async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+
+        const attendance = await Attendance.findOne({ userId, date: dateStr });
+
+        if (!attendance || !attendance.checkIn) {
+            return res.status(400).json({ message: 'You must check in first' });
+        }
+
+        if (attendance.checkOut) {
+            return res.status(400).json({ message: 'Already checked out today' });
+        }
+
+        const checkInTimeObj = new Date(attendance.checkIn);
+
+        // Determine shift duration and effective checkout
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (user.status === 'Deleted') return res.status(400).json({ message: 'Deleted users cannot mark attendance' });
+
+        // ── IP restriction check ──────────────────────────────────
+        const ipCheck = await checkIpRestriction(req);
+        if (!ipCheck.allowed) {
+            return res.status(403).json({ message: ipCheck.message, code: 'IP_RESTRICTED' });
+        }
+
+        const checkInTime = new Date(attendance.checkIn);
+        let effectiveCheckOut = pktNow;
+
+        // ── 5-minute minimum before checkout ─────────────────────
+        const minCheckoutMs = 5 * 60 * 1000; // 5 minutes
+        const elapsedMs = effectiveCheckOut - checkInTime;
+        if (elapsedMs < minCheckoutMs) {
+            const remainingSecs = Math.ceil((minCheckoutMs - elapsedMs) / 1000);
+            const remainingMins = Math.ceil(remainingSecs / 60);
+            return res.status(400).json({
+                message: `Please wait ${remainingMins} more minute${remainingMins !== 1 ? 's' : ''} before checking out.`,
+                code: 'TOO_EARLY_CHECKOUT',
+                remainingSeconds: remainingSecs
+            });
+        }
+        attendance.checkOut = effectiveCheckOut;
+        const durationMs = effectiveCheckOut - checkInTime;
+        const totalDurationMins = Math.floor(durationMs / (1000 * 60));
+        attendance.duration = totalDurationMins > 0 ? totalDurationMins : 0;
+
+        // Check for Early Go / Short Hours
+        const shiftEnd = user.shiftEnd || '17:00';
+        const [endH, endM] = shiftEnd.split(':').map(Number);
+        const shiftEndDate = new Date(pktNow);
+        shiftEndDate.setHours(endH, endM, 0, 0);
+
+        const isEarlyGo = effectiveCheckOut < shiftEndDate;
+        let finalStatus = attendance.status;
+
+        if (isEarlyGo && attendance.earlyGoStatus !== 'Approved') {
+            finalStatus = 'Short Hours';
+        }
+
+        if (attendance.status !== 'Late') {
+            attendance.status = finalStatus === 'Short Hours' ? 'Short Hours' : 'Present';
+        } else if (finalStatus === 'Short Hours') {
+            // Keep Late, or mark as Short Hours. Let's make it Short Hours if both, or keep Late.
+            // Wait, both result in half-day. Let's just keep 'Late' if it's already 'Late' because late is primary.
+            // But if they left early, let's keep 'Late' but they will still be penalized.
+        }
+
+        await attendance.save();
+
+        res.json({
+            message: 'Checked out successfully',
+            attendance
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get Current Status (for timer persistence)
+// @route   GET /api/attendance/status
+// @access  Private
+const getAttendanceStatus = async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+
+        const attendance = await Attendance.findOne({ userId, date: dateStr });
+        res.json(attendance || null);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get Stats
+// @route   GET /api/attendance/stats
+// @access  Private
+const getStats = async (req, res) => {
+    try {
+        const userId = req.user._id;
+
+        // Trigger reconciliation before fetching stats
+        await reconcileAttendance(userId);
+
+        const allAttendance = await Attendance.find({ userId });
+
+        const daysWorked = allAttendance.filter(a => a.checkIn).length;
+        const lateCount = allAttendance.filter(a => a.status === 'Late').length;
+        const totalAbsents = allAttendance.filter(a => a.status === 'Absent').length;
+
+        // Today's status
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+        const todayRecord = allAttendance.find(a => a.date === dateStr);
+
+        res.json({
+            lateArrivals: lateCount,
+            daysWorked,
+            todayStatus: todayRecord ? todayRecord.status : 'Not Started',
+            absents: totalAbsents
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Add Custom Attendance (Admin)
+// @route   POST /api/attendance/custom
+// @access  Private/Admin
+const addCustomAttendance = async (req, res) => {
+    try {
+        const { userId, date, checkIn, checkOut, status } = req.body;
+        
+        const user = await User.findOne({ _id: userId, adminId: req.adminId });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        let attendance = await Attendance.findOne({ userId, date });
+        
+        // Parse time if provided
+        let checkInDate = null;
+        let checkOutDate = null;
+        if (checkIn) {
+            checkInDate = new Date(`${date}T${checkIn}:00+05:00`);
+        }
+        if (checkOut) {
+            checkOutDate = new Date(`${date}T${checkOut}:00+05:00`);
+        }
+
+        if (attendance) {
+            if (checkInDate) attendance.checkIn = checkInDate;
+            if (checkOutDate) attendance.checkOut = checkOutDate;
+            if (status) attendance.status = status;
+        } else {
+            attendance = new Attendance({
+                userId,
+                adminId: req.adminId,
+                date,
+                checkIn: checkInDate,
+                checkOut: checkOutDate,
+                status: status || 'Present'
+            });
+        }
+
+        if (attendance.checkIn && attendance.checkOut) {
+            const durationMs = attendance.checkOut - attendance.checkIn;
+            const totalDurationMins = Math.floor(durationMs / (1000 * 60));
+            attendance.duration = totalDurationMins > 0 ? totalDurationMins : 0;
+        }
+
+        await attendance.save();
+
+        res.status(201).json({ message: 'Attendance recorded successfully', attendance });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get all attendance (Admin)
+// @route   GET /api/attendance
+// @access  Private/Admin
+const getAllAttendance = async (req, res) => {
+    try {
+        // Trigger reconciliation for all staff in bulk before fetching
+        const users = await User.find({ role: { $ne: 'Admin' }, adminId: req.adminId });
+        await reconcileMultipleUsersAttendance(users);
+
+        const attendance = await Attendance.find({ adminId: req.adminId })
+            .populate('userId', 'name employeeId role department offDays')
+            .sort({ date: -1, createdAt: -1 });
+        res.json(attendance);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Update Attendance Status (Admin Manual Override)
+// @route   PUT /api/attendance/:id
+// @access  Private/Admin
+const updateAttendance = async (req, res) => {
+    try {
+        const { status } = req.body;
+        const attendance = await Attendance.findOne({ _id: req.params.id, adminId: req.adminId });
+
+        if (!attendance) {
+            return res.status(404).json({ message: 'Attendance record not found' });
+        }
+
+        attendance.status = status || attendance.status;
+        await attendance.save();
+
+        res.json({ message: `Attendance updated to ${status}`, attendance });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get a specific user's attendance history (Admin)
+// @route   GET /api/attendance/user/:userId
+// @access  Private/Admin
+const getUserAttendanceHistory = async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        // Trigger reconciliation for this user before fetching
+        await reconcileAttendance(userId);
+
+        const attendance = await Attendance.find({ userId })
+            .populate('userId', 'name employeeId role department offDays')
+            .sort({ date: -1, createdAt: -1 });
+
+        res.json(attendance);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get logged-in user's attendance history
+// @route   GET /api/attendance/my-history
+// @access  Private
+const getMyAttendanceHistory = async (req, res) => {
+
+    try {
+        const userId = req.user._id;
+        const { month } = req.query; // YYYY-MM
+
+        // Trigger reconciliation before fetching
+        await reconcileAttendance(userId);
+
+        const query = { userId };
+        if (month) {
+            query.date = { $regex: `^${month}` };
+        }
+
+        const attendance = await Attendance.find(query).sort({ date: -1 });
+        res.json(attendance);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Overtime In
+// @route   POST /api/attendance/overtime-in
+// @access  Private
+const overtimeIn = async (req, res) => {
+    try {
+        if (!req.user.isOvertimeAllowed) {
+            return res.status(403).json({ message: 'You are not authorized to log overtime' });
+        }
+        
+        const userId = req.user._id;
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (user.status === 'Deleted') return res.status(400).json({ message: 'Deleted users cannot mark attendance' });
+
+
+
+        let attendance = await Attendance.findOne({ userId, date: dateStr });
+        
+        if (!attendance) {
+            attendance = new Attendance({
+                userId,
+                date: dateStr,
+                status: 'Absent',
+                adminId: req.adminId
+            });
+        }
+        
+        if (attendance.overtimeIn) return res.status(400).json({ message: 'Overtime already started' });
+        attendance.overtimeIn = pktNow;
+        attendance.overtimeStatus = 'Pending';
+        await attendance.save();
+        res.json({ message: 'Overtime started successfully', attendance });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Overtime Out
+// @route   POST /api/attendance/overtime-out
+// @access  Private
+const overtimeOut = async (req, res) => {
+    try {
+        if (!req.user.isOvertimeAllowed) {
+            return res.status(403).json({ message: 'You are not authorized to log overtime' });
+        }
+
+        const userId = req.user._id;
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+        const attendance = await Attendance.findOne({ userId, date: dateStr });
+        if (!attendance || !attendance.overtimeIn) return res.status(400).json({ message: 'No overtime started' });
+        if (attendance.overtimeOut) return res.status(400).json({ message: 'Overtime already ended' });
+        attendance.overtimeOut = pktNow;
+        attendance.overtimeStatus = 'Pending';
+        await attendance.save();
+        res.json({ message: 'Overtime ended successfully, waiting for admin approval', attendance });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Approve/Reject Overtime (Admin)
+// @route   PUT /api/attendance/overtime/approve/:id
+// @access  Private/Admin
+const approveOvertime = async (req, res) => {
+    try {
+        const { status, reason } = req.body; 
+        if (!['Approved', 'Rejected'].includes(status)) {
+            return res.status(400).json({ message: 'Invalid status' });
+        }
+
+        const attendance = await Attendance.findOne({ _id: req.params.id, adminId: req.adminId });
+        if (!attendance) return res.status(404).json({ message: 'Record not found' });
+
+        attendance.overtimeStatus = status;
+        if (status === 'Rejected') {
+            attendance.overtimeRejectReason = reason || 'No reason provided';
+        }
+        await attendance.save();
+
+        res.json({ message: `Overtime ${status.toLowerCase()} successfully`, attendance });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Enroll employee face — blocked for users who already have a face enrolled
+// @route   POST /api/attendance/enroll-face
+// @access  Private — self-enrollment only; admin can re-enroll on behalf
+const enrollFace = async (req, res) => {
+    try {
+        const { userId, descriptors } = req.body;
+        if (!userId || !descriptors) {
+            return res.status(400).json({ success: false, message: 'Missing userId or descriptors' });
+        }
+        if (!Array.isArray(descriptors) || descriptors.length < 3) {
+            return res.status(400).json({ success: false, message: 'At least 3 face samples are required' });
+        }
+
+        const isAdmin = req.user?.role === 'Admin';
+        const isSelfEnrollment = req.user && req.user._id.toString() === userId.toString();
+
+        // Only allow self-enrollment or admin — nobody else
+        if (!isAdmin && !isSelfEnrollment) {
+            return res.status(403).json({ success: false, message: 'You can only enroll your own face' });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+        if (user.status === 'Deleted') {
+            return res.status(400).json({ success: false, message: 'Deleted users cannot enroll faces' });
+        }
+
+        // Block re-enrollment for non-admins — face is permanent once set
+        if (!isAdmin && user.faceEnrolled) {
+            return res.status(403).json({
+                success: false,
+                message: 'Face is already enrolled. Contact your admin to re-enroll.'
+            });
+        }
+
+        // ✅ Check if this face is already enrolled by another user (anti-spoofing)
+        const allEnrolledUsers = await User.find({
+            _id: { $ne: userId }, // Exclude current user
+            faceEnrolled: true,
+            faceDescriptors: { $exists: true, $ne: [] },
+            adminId: user.adminId // Only check within same tenant
+        }).select('_id name faceDescriptors');
+
+        // Compare incoming face descriptors with all existing enrolled faces
+        // Lower threshold = stricter matching (0.6 = same person, 0.3 = identical face)
+        const FACE_MATCH_THRESHOLD = 0.35; // Strict threshold to prevent false positives
+        
+        let minDistance = Infinity;
+        let closestUser = null;
+        
+        for (const existingUser of allEnrolledUsers) {
+            if (!existingUser.faceDescriptors || existingUser.faceDescriptors.length === 0) continue;
+
+            // Compare each new descriptor with each existing descriptor
+            for (const newDesc of descriptors) {
+                if (!newDesc || newDesc.length !== 128) continue;
+                for (const existingDesc of existingUser.faceDescriptors) {
+                    if (!existingDesc || existingDesc.length !== 128) continue;
+                    // Calculate Euclidean distance
+                    const distance = euclideanDistance(newDesc, existingDesc);
+                    
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        closestUser = existingUser;
+                    }
+                    
+                    if (distance < FACE_MATCH_THRESHOLD) {
+                        console.log(`⚠️ DUPLICATE FACE BLOCKED: User ${userId} attempted to enroll face already used by ${existingUser.name} (${existingUser._id}). Distance: ${distance.toFixed(4)} (threshold: ${FACE_MATCH_THRESHOLD})`);
+                        return res.status(409).json({
+                            success: false,
+                            message: `This face is already registered to another account. Please use your own face.`,
+                            code: 'FACE_ALREADY_ENROLLED'
+                        });
+                    }
+                }
+            }
+        }
+        
+        console.log(`✅ Face uniqueness check passed. Min distance to existing faces: ${minDistance.toFixed(4)} (threshold: ${FACE_MATCH_THRESHOLD})`);
+        if (closestUser) {
+            console.log(`   Closest match: ${closestUser.name} (${closestUser._id})`);
+        }
+
+        user.faceDescriptors = descriptors;
+        user.faceEnrolled = true;
+        await user.save();
+
+        console.log(`✅ Face enrolled successfully for user ${user.name} (${userId})`);
+        res.json({ success: true, message: 'Face enrolled successfully' });
+    } catch (error) {
+        console.error('Error in enrollFace:', error);
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
+// Helper: Calculate Euclidean distance between two face descriptors
+function euclideanDistance(arr1, arr2) {
+    if (!arr1 || !arr2 || arr1.length !== arr2.length) return Infinity;
+    let sum = 0;
+    for (let i = 0; i < arr1.length; i++) {
+        const diff = arr1[i] - arr2[i];
+        sum += diff * diff;
+    }
+    return Math.sqrt(sum);
+}
+
+// @desc    Get face descriptors — employees only get their own, admins get all
+// @route   GET /api/attendance/face-descriptors
+// @access  Private
+const getFaceDescriptors = async (req, res) => {
+    try {
+        // Employees can only fetch their own face descriptor (not everyone's)
+        if (req.user.role !== 'Admin') {
+            const employee = await User.findOne({
+                _id: req.user._id,
+                faceEnrolled: true
+            }).select('_id name faceDescriptors');
+
+            if (!employee) {
+                return res.json({ employees: [] });
+            }
+            return res.json({ employees: [employee] });
+        }
+
+        // Admins get all (for kiosk / admin tools)
+        const employees = await User.find({ faceEnrolled: true, adminId: req.adminId })
+            .select('_id name faceDescriptors');
+        res.json({ employees });
+    } catch (error) {
+        console.error('Error in getFaceDescriptors:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Auto Check-In/Out via Face Recognition — only the logged-in user can mark their own attendance
+// @route   POST /api/attendance/face-checkin
+// @access  Private (Employee session required)
+const faceCheckIn = async (req, res) => {
+    try {
+        const { userId } = req.body;
+
+        // Security: the userId in the request must match the authenticated session
+        // This prevents anyone from posting another user's ID to mark their attendance
+        if (!req.user || req.user._id.toString() !== userId?.toString()) {
+            return res.status(403).json({
+                message: 'Unauthorized: You can only mark your own attendance.'
+            });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (user.status === 'Deleted') return res.status(400).json({ message: 'Deleted users cannot mark attendance' });
+
+        // Extra guard: user must have an enrolled face to use face check-in
+        if (!user.faceEnrolled) {
+            return res.status(403).json({ message: 'Face not enrolled. Please enroll before marking attendance.' });
+        }
+
+        const pktNow = getPKTTime(); // Use server time for security
+        const dateStr = getPKTDateString(pktNow);
+
+        let attendance = await Attendance.findOne({ userId, date: dateStr });
+
+        // --- CASE 1: INITIAL SCAN (Check-In) ---
+        if (!attendance) {
+            // Enforce shift timing — block early check-ins, tag late arrivals
+            const shiftCheck = checkShiftTiming(user, pktNow);
+            if (!shiftCheck.allowed) {
+                return res.status(403).json({
+                    action: 'too_early',
+                    employeeName: user.name,
+                    message: shiftCheck.message,
+                    code: 'TOO_EARLY',
+                    shiftStart: user.shiftStart || '09:00'
+                });
+            }
+
+            const checkInStatus = shiftCheck.status; // 'Present' or 'Late'
+
+            attendance = new Attendance({
+                userId,
+                date: dateStr,
+                checkIn: pktNow,
+                status: checkInStatus,
+                adminId: user.adminId,
+                markedByFace: true
+            });
+            await attendance.save();
+
+            const checkInMsg = checkInStatus === 'Late'
+                ? `Checked In (Late — ${shiftCheck.minutesLate} min)`
+                : 'Checked In';
+
+            return res.json({
+                action: 'checkin',
+                status: checkInStatus,
+                minutesLate: shiftCheck.minutesLate,
+                employeeName: user.name,
+                checkInTime: format12h(formatInTimeZone(pktNow, 'Asia/Karachi', 'HH:mm')),
+                message: checkInMsg
+            });
+        }
+
+        // --- CASE 2: REPEAT SCAN (Check-Out) ---
+        if (attendance.checkOut) {
+            return res.json({
+                action: 'completed',
+                employeeName: user.name,
+                message: 'Shift already completed for today. See you tomorrow!'
+            });
+        }
+
+        if (attendance.checkIn && !attendance.checkOut) {
+            const checkInTime = new Date(attendance.checkIn);
+            
+            let effectiveCheckOut = pktNow;
+
+            attendance.checkOut = effectiveCheckOut;
+            attendance.markedByFace = true;
+
+            const regularDurationMs = Math.max(0, effectiveCheckOut - checkInTime);
+            attendance.duration = Math.floor(regularDurationMs / (1000 * 60));
+
+            await attendance.save();
+
+            return res.json({
+                action: 'checkout',
+                employeeName: user.name,
+                checkOutTime: format12h(formatInTimeZone(effectiveCheckOut, 'Asia/Karachi', 'HH:mm')),
+                message: 'Checked Out'
+            });
+        }
+
+        return res.json({ action: 'none', message: 'No action taken' });
+
+    } catch (error) {
+        console.error('Error in faceCheckIn:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Delete/Unenroll employee face
+// @route   DELETE /api/attendance/enroll-face/:userId
+// @access  Private/Admin
+const unenrollFace = async (req, res) => {
+    try {
+        const user = await User.findById(req.params.userId);
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        user.faceDescriptors = [];
+        user.faceEnrolled = false;
+        await user.save();
+
+        res.json({ success: true, message: 'Face data deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Delete/Unenroll ALL employee faces
+// @route   DELETE /api/attendance/enroll-face
+// @access  Private/Admin
+const unenrollAllFaces = async (req, res) => {
+    try {
+        // Find all users who have faces enrolled and reset their fields
+        await User.updateMany(
+            { faceEnrolled: true },
+            { $set: { faceDescriptors: [], faceEnrolled: false } }
+        );
+
+        res.json({ success: true, message: 'All face data deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting all faces:', error);
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Request Early Go
+// @route   POST /api/attendance/request-early-go
+// @access  Private
+const requestEarlyGo = async (req, res) => {
+    try {
+        const { time } = req.body;
+        if (!time) {
+            return res.status(400).json({ message: 'Time is required' });
+        }
+
+        const userId = req.user._id;
+        const pktNow = getPKTTime();
+        const dateStr = getPKTDateString(pktNow);
+
+        const attendance = await Attendance.findOne({ userId, date: dateStr });
+
+        if (!attendance) {
+            return res.status(404).json({ message: 'No attendance record found for today' });
+        }
+        if (attendance.checkOut) {
+            return res.status(400).json({ message: 'Cannot request early go after checking out' });
+        }
+
+        attendance.earlyGoStatus = 'Pending';
+        attendance.earlyGoTime = time;
+        await attendance.save();
+
+        // Notify Admin
+        const userObj = await User.findById(userId);
+        if (userObj && userObj.adminId) {
+            const { createNotification } = require('./notificationController');
+            await createNotification({
+                userId: userObj.adminId,
+                senderId: userId,
+                title: 'Early Go Request',
+                message: `${userObj.name} requested to leave early at ${time}.`,
+                type: 'EarlyGoRequest',
+                link: '/admin/attendance'
+            });
+        }
+
+        res.json({ message: 'Early go request submitted successfully', attendance });
+    } catch (error) {
+        console.error('Error requesting early go:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Resolve Late Status
+// @route   POST /api/attendance/:id/resolve-late
+// @access  Private/Admin
+const resolveLate = async (req, res) => {
+    try {
+        const attendance = await Attendance.findOne({ _id: req.params.id, adminId: req.adminId });
+        if (!attendance) {
+            return res.status(404).json({ message: 'Attendance record not found' });
+        }
+
+        attendance.isLateResolved = true;
+        await attendance.save();
+
+        res.json({ message: 'Late tag removed successfully', attendance });
+    } catch (error) {
+        console.error('Error resolving late:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Resolve Early Go Request
+// @route   POST /api/attendance/:id/resolve-early-go
+// @access  Private/Admin
+const resolveEarlyGo = async (req, res) => {
+    try {
+        const { status } = req.body; // 'Approved' or 'Rejected'
+        if (!['Approved', 'Rejected'].includes(status)) {
+            return res.status(400).json({ message: 'Invalid status' });
+        }
+
+        const attendance = await Attendance.findOne({ _id: req.params.id, adminId: req.adminId });
+        if (!attendance) {
+            return res.status(404).json({ message: 'Attendance record not found' });
+        }
+
+        attendance.earlyGoStatus = status;
+        await attendance.save();
+
+        // Notify Employee
+        const { createNotification } = require('./notificationController');
+        await createNotification({
+            userId: attendance.userId,
+            senderId: req.user._id,
+            title: `Early Go Request ${status}`,
+            message: `Your early go request to leave at ${attendance.earlyGoTime} has been ${status.toLowerCase()}.`,
+            type: 'EarlyGoStatus',
+            link: '/employee/attendance'
+        });
+
+        res.json({ message: `Early go request ${status.toLowerCase()} successfully`, attendance });
+    } catch (error) {
+        console.error('Error resolving early go:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+// @desc    Get Pending Early Go Requests
+// @route   GET /api/attendance/pending-early-go
+// @access  Private/Admin
+const getPendingEarlyGo = async (req, res) => {
+    try {
+        const pendingRequests = await Attendance.find({
+            adminId: req.adminId,
+            earlyGoStatus: 'Pending'
+        }).populate('userId', 'name employeeId department').sort({ date: -1, checkIn: -1 });
+
+        res.json(pendingRequests);
+    } catch (error) {
+        console.error('Error fetching pending early go requests:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+};
+
+module.exports = {
+    reconcileAttendance,
+    reconcileMultipleUsersAttendance,
+    checkIn,
+    checkOut,
+    requestEarlyGo,
+    resolveLate,
+    resolveEarlyGo,
+    getPendingEarlyGo,
+    overtimeIn,
+    overtimeOut,
+    getAttendanceStatus,
+    getStats,
+    getAllAttendance,
+    updateAttendance,
+    getUserAttendanceHistory,
+    getMyAttendanceHistory,
+    approveOvertime,
+    triggerManualReport,
+    enrollFace,
+    getFaceDescriptors,
+    faceCheckIn,
+    addCustomAttendance,
+    unenrollFace,
+    unenrollAllFaces
+};
+

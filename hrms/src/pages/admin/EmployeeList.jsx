@@ -1,0 +1,612 @@
+import { API_BASE_URL } from '../../config';
+import React, { useState, useEffect } from 'react';
+import { Plus, Search, Mail, Phone, Calendar, Edit2, Trash2, Camera } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Button } from '../../components/ui/Button';
+import { Input } from '../../components/ui/Input';
+import { useAuth } from '../../context/AuthContext';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/Card';
+import { Badge } from '../../components/ui/Badge';
+import { Modal } from '../../components/ui/Modal';
+import { usePermissions } from '../../context/PermissionsContext';
+
+const EmployeeList = () => {
+    const navigate = useNavigate();
+    const { can } = usePermissions();
+    const { adminUser } = useAuth();
+    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState({ type: '', text: '' });
+    const [editingEmployee, setEditingEmployee] = useState(null);
+
+    const format12h = (time24) => {
+        if (!time24) return '';
+        const [hours, minutes] = time24.split(':');
+        const h = parseInt(hours);
+        const m = minutes;
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const h12 = h % 12 || 12;
+        return `${h12}:${m} ${ampm}`;
+    };
+
+    const [formData, setFormData] = useState({
+        firstName: '',
+        lastName: '',
+        email: '',
+        password: '',
+        department: '',
+        role: '',
+        salary: '',
+        shiftStart: '09:00',
+        shiftEnd: '17:00',
+        lateGraceMinutes: '15',
+        isOvertimeAllowed: false,
+    });
+
+    const [employees, setEmployees] = useState([]);
+    // Dedicated offDay state — isolated from formData to prevent re-render conflicts
+    const [selectedOffDay, setSelectedOffDay] = useState(5);
+
+    useEffect(() => {
+        fetchEmployees();
+    }, []);
+
+    const fetchEmployees = async () => {
+        try {
+            const roleHeader = adminUser?.role || 'Admin';
+            const response = await fetch(`${API_BASE_URL}/users`, {
+                headers: { 'X-Role-Context': roleHeader },
+                credentials: 'include'
+            });
+            const data = await response.json();
+            if (response.ok) {
+                setEmployees(Array.isArray(data) ? data : []);
+            }
+        } catch (error) {
+            console.error('Error fetching employees:', error);
+        }
+    };
+
+    const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleEditClick = (employee) => {
+        setEditingEmployee(employee);
+        const [firstName, ...lastNameParts] = employee.name.split(' ');
+        const empOffDay = Array.isArray(employee.offDays) && employee.offDays.length > 0 ? Number(employee.offDays[0]) : 5;
+        setSelectedOffDay(empOffDay);
+        setFormData({
+            firstName,
+            lastName: lastNameParts.join(' '),
+            email: employee.email || '',
+            password: '',
+            department: employee.department,
+            role: employee.role,
+            salary: employee.salary || '',
+            shiftStart: employee.shiftStart || '09:00',
+            shiftEnd: employee.shiftEnd || '17:00',
+            lateGraceMinutes: String(employee.lateGraceMinutes !== undefined ? employee.lateGraceMinutes : 15),
+            isOvertimeAllowed: employee.isOvertimeAllowed || false,
+        });
+        setIsEditModalOpen(true);
+    };
+
+
+    const handleCreateEmployee = async () => {
+        setLoading(true);
+        setMessage({ type: '', text: '' });
+
+        if (!formData.email || !formData.email.trim().includes('@')) {
+            setMessage({ type: 'error', text: 'A valid email address is required so the employee can login.' });
+            setLoading(false);
+            return;
+        }
+        if (!formData.password || formData.password.length < 6) {
+            setMessage({ type: 'error', text: 'Password must be at least 6 characters.' });
+            setLoading(false);
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/users/add`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Role-Context': 'Admin'
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    name: `${formData.firstName} ${formData.lastName}`,
+                    email: formData.email.trim(),
+                    password: formData.password,
+                    department: formData.department,
+                    role: formData.role,
+                    salary: Number(formData.salary) || 0,
+                    offDays: [selectedOffDay],
+                    shiftStart: formData.shiftStart || '09:00',
+                    shiftEnd: formData.shiftEnd || '17:00',
+                    lateGraceMinutes: Number(formData.lateGraceMinutes) || 15,
+                    isOvertimeAllowed: formData.isOvertimeAllowed,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                setMessage({ type: 'success', text: `Employee created! Login: ${formData.email} | Password: ${formData.password}` });
+                fetchEmployees();
+                setTimeout(() => {
+                    setIsAddModalOpen(false);
+                    resetForm();
+                    navigate('/admin/employees');
+                }, 3000);
+            } else {
+                setMessage({ type: 'error', text: data.message || 'Failed to create employee' });
+            }
+        } catch (error) {
+            setMessage({ type: 'error', text: 'Error connecting to server' });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleUpdateEmployee = async () => {
+        setLoading(true);
+        setMessage({ type: '', text: '' });
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/users/${editingEmployee._id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Role-Context': 'Admin'
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    name: `${formData.firstName} ${formData.lastName}`,
+                    department: formData.department,
+                    role: formData.role,
+                    salary: Number(formData.salary) || 0,
+                    offDays: [selectedOffDay],
+                    shiftStart: formData.shiftStart || '09:00',
+                    shiftEnd: formData.shiftEnd || '17:00',
+                    lateGraceMinutes: Number(formData.lateGraceMinutes) || 15,
+                    isOvertimeAllowed: formData.isOvertimeAllowed,
+                }),
+            });
+
+            if (response.ok) {
+                setMessage({ type: 'success', text: 'Employee updated successfully!' });
+                fetchEmployees();
+                setTimeout(() => {
+                    setIsEditModalOpen(false);
+                    resetForm();
+                }, 2000);
+            } else {
+                const data = await response.json();
+                setMessage({ type: 'error', text: data.message || 'Failed to update employee' });
+            }
+        } catch (error) {
+            setMessage({ type: 'error', text: 'Error connecting to server' });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteEmployee = async (id) => {
+        if (!window.confirm('Are you sure you want to PERMANENTLY delete this employee? This cannot be undone!')) return;
+
+        try {
+            setLoading(true);
+            const response = await fetch(`${API_BASE_URL}/users/${id}/permanent`, {
+                method: 'DELETE',
+                headers: { 'X-Role-Context': 'Admin' },
+                credentials: 'include'
+            });
+
+            if (response.ok) {
+                setMessage({ type: 'success', text: 'Employee permanently deleted!' });
+                fetchEmployees();
+                setTimeout(() => {
+                    setIsEditModalOpen(false);
+                    resetForm();
+                }, 1500);
+            } else {
+                const data = await response.json();
+                setMessage({ type: 'error', text: data.message || 'Failed to delete employee' });
+            }
+        } catch (error) {
+            console.error('Error deleting employee:', error);
+            setMessage({ type: 'error', text: 'Connection error. Try again.' });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteUserFace = async (id) => {
+        if (!window.confirm("Are you sure you want to delete this employee's face data?")) return;
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/attendance/enroll-face/${id}`, {
+                method: 'DELETE',
+                headers: { 'X-Role-Context': 'Admin' },
+                credentials: 'include'
+            });
+
+            if (response.ok) {
+                setMessage({ type: 'success', text: 'Face data deleted successfully!' });
+                fetchEmployees();
+                setTimeout(() => {
+                    setIsEditModalOpen(false);
+                    resetForm();
+                }, 2000);
+            } else {
+                const data = await response.json();
+                setMessage({ type: 'error', text: data.message || 'Failed to delete face data' });
+            }
+        } catch (error) {
+            setMessage({ type: 'error', text: 'Error connecting to server' });
+        }
+    };
+
+    const resetForm = () => {
+        setFormData({
+            firstName: '',
+            lastName: '',
+            email: '',
+            password: '',
+            department: '',
+            role: '',
+            salary: '',
+            shiftStart: '09:00',
+            shiftEnd: '17:00',
+            lateGraceMinutes: '15',
+            isOvertimeAllowed: false,
+        });
+        setSelectedOffDay(5);
+        setEditingEmployee(null);
+        setMessage({ type: '', text: '' });
+    };
+
+    const filteredEmployees = employees.filter(
+        (emp) => emp.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            (emp.employeeId && emp.employeeId.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            emp.role.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+
+    return (
+        <div className="space-y-6 animate-in fade-in duration-500">
+            {/* ... (Header and Table remains mostly same, maybe add Salary column if needed, but let's stick to modal first) */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                    <h1 className="text-3xl font-bold tracking-tight text-foreground">Employees</h1>
+                    <p className="text-muted-foreground mt-1">Manage your team members and their roles.</p>
+                </div>
+                {can('employees', 'edit') && (
+                    <Button onClick={() => { resetForm(); setIsAddModalOpen(true); }} className="w-full sm:w-auto shadow-lg shadow-primary/20">
+                        <Plus className="mr-2 h-4 w-4" /> Add Employee
+                    </Button>
+                )}
+            </div>
+
+            <Card className="border-muted/40 shadow-sm">
+                <CardHeader className="pb-3">
+                    <div className="flex items-center justify-between">
+                        <CardTitle>All Staff</CardTitle>
+                        <div className="relative w-full max-w-sm">
+                            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                            <Input
+                                placeholder="Search employees..."
+                                className="pl-9 h-9"
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                            />
+                        </div>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    <div className="rounded-md border border-muted/40 overflow-hidden">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-muted/50 text-muted-foreground font-medium">
+                                <tr>
+                                    <th className="h-10 px-4 py-3 align-middle">Name</th>
+                                    <th className="h-10 px-4 py-3 align-middle hidden sm:table-cell">Role</th>
+                                    <th className="h-10 px-4 py-3 align-middle hidden md:table-cell">Department</th>
+                                    <th className="h-10 px-4 py-3 align-middle">Status</th>
+                                    <th className="h-10 px-4 py-3 align-middle hidden sm:table-cell">Face Status</th>
+                                    <th className="h-10 px-4 py-3 align-middle text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border/40 bg-card">
+                                {filteredEmployees.map((employee) => (
+                                    <tr key={employee._id} className={`hover:bg-muted/30 transition-colors ${employee.status === 'Deleted' ? 'line-through opacity-50 bg-muted/20' : ''}`}>
+                                        <td className="p-4 align-middle">
+                                            <div className="flex items-center gap-3">
+                                                <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xs ring-2 ring-background">
+                                                    {employee.name?.split(' ').map(n => n[0]).join('') || '?'}
+                                                </div>
+                                                <div className="flex flex-col">
+                                                    <span className="font-semibold">{employee.name || 'Unknown'}</span>
+                                                    <span className="text-xs text-muted-foreground">{employee.employeeId || 'No ID'}</span>
+                                                </div>
+
+                                            </div>
+                                        </td>
+                                        <td className="p-4 align-middle hidden sm:table-cell">
+                                            {employee.role === 'Manager' ? (
+                                                <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-md bg-amber-50 text-amber-700 border border-amber-200">
+                                                    ⚡ Manager
+                                                </span>
+                                            ) : (
+                                                employee.role
+                                            )}
+                                        </td>
+                                        <td className="p-4 align-middle hidden md:table-cell">
+                                            <Badge variant="secondary" className="rounded-md px-2 font-normal">
+                                                {employee.department}
+                                            </Badge>
+                                        </td>
+                                        <td className="p-4 align-middle">
+                                            <Badge variant={employee.status === 'Active' ? 'success' : 'warning'}>
+                                                {employee.status || 'Active'}
+                                            </Badge>
+                                        </td>
+                                        <td className="p-4 align-middle hidden sm:table-cell">
+                                            {employee.faceEnrolled ? (
+                                                <Badge className="bg-emerald-100 text-emerald-800 border-emerald-200">Enrolled</Badge>
+                                            ) : (
+                                                <Badge className="bg-rose-100 text-rose-800 border-rose-200">Not Enrolled</Badge>
+                                            )}
+                                        </td>
+                                        <td className="p-4 align-middle text-right">
+                                            <div className="flex justify-end gap-2">
+                                                {can('employees', 'edit') && (
+                                                    <Button variant="ghost" size="icon" className="h-8 w-8 text-primary disabled:opacity-50" disabled={employee.status === 'Deleted'} onClick={() => handleEditClick(employee)}>
+                                                        <Edit2 className="h-4 w-4" />
+                                                    </Button>
+                                                )}
+                                                {can('employees', 'delete') && employee.faceEnrolled && (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-8 w-8 text-amber-600 hover:text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                                                        title="Remove Face Data"
+                                                        onClick={() => handleDeleteUserFace(employee._id)}
+                                                    >
+                                                        <Camera className="h-4 w-4" />
+                                                    </Button>
+                                                )}
+                                                {can('employees', 'delete') && (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-8 w-8 text-destructive hover:text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                                        title="Delete Employee Permanently"
+                                                        onClick={() => handleDeleteEmployee(employee._id)}
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </Button>
+                                                )}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* Add/Edit Modal */}
+            <Modal
+                isOpen={isAddModalOpen || isEditModalOpen}
+                onClose={() => { setIsAddModalOpen(false); setIsEditModalOpen(false); resetForm(); }}
+                title={isEditModalOpen ? "Edit Employee" : "Add New Employee"}
+                footer={
+                    <>
+                        <Button variant="ghost" onClick={() => { setIsAddModalOpen(false); setIsEditModalOpen(false); resetForm(); }} disabled={loading}>Cancel</Button>
+                        <Button onClick={isEditModalOpen ? handleUpdateEmployee : handleCreateEmployee} disabled={loading}>
+                            {loading ? (isEditModalOpen ? 'Updating...' : 'Creating...') : (isEditModalOpen ? 'Save Changes' : 'Create Employee')}
+                        </Button>
+                    </>
+                }
+            >
+                <div className="space-y-6">
+                    {message.text && (
+                        <div className={`p-4 rounded-xl text-sm font-medium animate-in fade-in slide-in-from-top-2 duration-300 ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-rose-50 text-rose-700 border border-rose-100'}`}>
+                            {message.text}
+                        </div>
+                    )}
+
+                    {/* Employee ID is auto-generated — show read-only in edit mode */}
+                    {isEditModalOpen && (
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Employee ID</label>
+                            <Input value={editingEmployee?.employeeId || ''} disabled className="bg-muted/30 border-muted-foreground/20 opacity-60" />
+                            <p className="text-xs text-muted-foreground">Auto-assigned. Cannot be changed.</p>
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">First Name</label>
+                            <Input name="firstName" value={formData.firstName} onChange={handleInputChange} placeholder="John" className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all" />
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Last Name</label>
+                            <Input name="lastName" value={formData.lastName} onChange={handleInputChange} placeholder="Doe" className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all" />
+                        </div>
+                    </div>
+
+                    {/* Email & Password — login credentials */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Email <span className="text-rose-500">*</span></label>
+                            <Input
+                                name="email"
+                                type="email"
+                                value={formData.email}
+                                onChange={handleInputChange}
+                                placeholder="john@company.com"
+                                className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all"
+                            />
+                            <p className="text-xs text-muted-foreground">Used for employee login.</p>
+                        </div>
+                        {!isEditModalOpen && (
+                            <div className="space-y-2">
+                                <label className="text-sm font-bold text-foreground/80">Password <span className="text-rose-500">*</span></label>
+                                <Input
+                                    name="password"
+                                    type="text"
+                                    value={formData.password}
+                                    onChange={handleInputChange}
+                                    placeholder="Min. 6 characters"
+                                    className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all font-mono"
+                                />
+                                <p className="text-xs text-muted-foreground">Employee uses this to login.</p>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Department</label>
+                            <Input name="department" value={formData.department} onChange={handleInputChange} placeholder="Engineering" className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all" />
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Role / Title</label>
+                            <select
+                                name="role"
+                                value={formData.role}
+                                onChange={handleInputChange}
+                                className="w-full h-10 rounded-md border border-muted-foreground/20 bg-muted/30 px-3 text-sm focus:bg-background focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                            >
+                                <option value="">Select role...</option>
+                                <option value="Employee">Employee</option>
+                                <option value="Manager">Manager (IP Controller)</option>
+                            </select>
+                            {formData.role === 'Manager' && (
+                                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 flex items-center gap-1.5">
+                                    <span>⚡</span> Manager can log in to update the office IP for attendance verification.
+                                </p>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-foreground/80">Monthly Salary (Rs)</label>
+                            <Input
+                                name="salary"
+                                type="number"
+                                value={formData.salary}
+                                onChange={handleInputChange}
+                                placeholder="e.g. 25000"
+                                min="0"
+                                className="bg-muted/30 border-muted-foreground/20 focus:bg-background transition-all"
+                            />
+                            <p className="text-xs text-muted-foreground">Base monthly salary used for payroll calculation.</p>
+                        </div>
+                    </div>
+
+                    {/* ── Shift Schedule ── */}
+                    <div className="pt-2">
+                        <div className="flex items-center gap-2 mb-3">
+                            <div className="h-5 w-1 rounded-full bg-primary" />
+                            <label className="text-sm font-bold text-foreground">Shift Schedule</label>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div className="space-y-2">
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Shift Start</label>
+                                <input
+                                    type="time"
+                                    name="shiftStart"
+                                    value={formData.shiftStart}
+                                    onChange={handleInputChange}
+                                    className="w-full h-10 rounded-md border border-muted-foreground/20 bg-muted/30 px-3 text-sm focus:bg-background focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                                />
+                                <p className="text-xs text-muted-foreground">Earliest allowed check-in time.</p>
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Shift End</label>
+                                <input
+                                    type="time"
+                                    name="shiftEnd"
+                                    value={formData.shiftEnd}
+                                    onChange={handleInputChange}
+                                    className="w-full h-10 rounded-md border border-muted-foreground/20 bg-muted/30 px-3 text-sm focus:bg-background focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                                />
+                                <p className="text-xs text-muted-foreground">Expected end of work shift.</p>
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Late Grace (min)</label>
+                                <input
+                                    type="number"
+                                    name="lateGraceMinutes"
+                                    value={formData.lateGraceMinutes}
+                                    onChange={handleInputChange}
+                                    min="0"
+                                    max="120"
+                                    className="w-full h-10 rounded-md border border-muted-foreground/20 bg-muted/30 px-3 text-sm focus:bg-background focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                                />
+                                <p className="text-xs text-muted-foreground">Minutes after shift start before marking Late.</p>
+                            </div>
+                        </div>
+
+                        {/* Shift summary badge */}
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            <span className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                🕐 {format12h(formData.shiftStart)} – {format12h(formData.shiftEnd)}
+                            </span>
+                            <span className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                                ⏱ {formData.lateGraceMinutes || 15} min grace period
+                            </span>
+                        </div>
+                    </div>
+
+
+
+                    {/* ── Danger Zone (Admin only) ── */}
+                    {isEditModalOpen && can('employees', 'delete') && (
+                        <div className="pt-4 mt-6 border-t border-rose-200/50 space-y-4">
+                            <h3 className="text-sm font-bold text-rose-600 flex items-center gap-2">
+                                <Trash2 className="h-4 w-4" /> Danger Zone
+                            </h3>
+                            <div className="flex flex-col sm:flex-row gap-3">
+                                {editingEmployee?.faceEnrolled && (
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="text-amber-600 border-amber-200 hover:bg-amber-50 hover:text-amber-700"
+                                        onClick={() => handleDeleteUserFace(editingEmployee._id)}
+                                        disabled={loading}
+                                    >
+                                        <Camera className="h-4 w-4 mr-2" /> Remove Face Data
+                                    </Button>
+                                )}
+                                <Button
+                                    type="button"
+                                    variant="destructive"
+                                    className="bg-rose-600 hover:bg-rose-700"
+                                    onClick={() => handleDeleteEmployee(editingEmployee._id)}
+                                    disabled={loading}
+                                >
+                                    <Trash2 className="h-4 w-4 mr-2" /> Delete Employee Permanently
+                                </Button>
+                            </div>
+                            <p className="text-xs text-rose-500">⚠️ Permanent delete removes all data and cannot be undone.</p>
+                        </div>
+                    )}
+                </div>
+            </Modal>
+        </div>
+    );
+};
+
+export default EmployeeList;
+

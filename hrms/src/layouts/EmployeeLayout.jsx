@@ -1,0 +1,283 @@
+import { API_BASE_URL } from '../config';
+import React, { useState, useEffect, useRef } from 'react';
+import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import {
+    LayoutDashboard,
+    Camera,
+    CalendarCheck,
+    Wallet,
+    UserCircle,
+    LogOut,
+    Bell,
+    Search,
+    Menu,
+    X,
+    FileText,
+    BookOpen
+} from 'lucide-react';
+import { Button } from '../components/ui/Button';
+import { Input } from '../components/ui/Input';
+
+const EmployeeLayout = () => {
+    const navigate = useNavigate();
+    const { employeeUser, adminUser, logout } = useAuth();
+    const user = employeeUser || adminUser;
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+    const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+    const [notifications, setNotifications] = useState([]);
+    const dropdownRef = useRef(null);
+
+    useEffect(() => {
+        fetchNotifications();
+        const interval = setInterval(fetchNotifications, 30000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+                setIsNotificationOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const fetchNotifications = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/notifications`, {
+                headers: { 'X-Role-Context': 'Employee' },
+                credentials: 'include'
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setNotifications(data);
+            }
+        } catch (error) {
+            console.error('Error fetching notifications:', error);
+        }
+    };
+
+    const handleMarkAsRead = async (id) => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/notifications/${id}/read`, {
+                method: 'PUT',
+                headers: { 'X-Role-Context': 'Employee' },
+                credentials: 'include'
+            });
+            if (res.ok) {
+                setNotifications(prev => prev.map(n => n._id === id ? { ...n, isRead: true } : n));
+            }
+        } catch (error) {
+            console.error('Error marking notification read:', error);
+        }
+    };
+
+    const handleMarkAllAsRead = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/notifications/read-all`, {
+                method: 'PUT',
+                headers: { 'X-Role-Context': 'Employee' },
+                credentials: 'include'
+            });
+            if (res.ok) {
+                setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+            }
+        } catch (error) {
+            console.error('Error marking all notifications read:', error);
+        }
+    };
+
+    const handleLogout = () => {
+        logout('Employee');
+        navigate('/login');
+    };
+
+    const navItems = [
+        { icon: LayoutDashboard, label: 'Dashboard', path: '/employee/dashboard' },
+        { icon: Camera, label: 'Mark Attendance', path: '/employee/mark-attendance' },
+        { icon: CalendarCheck, label: 'View Attendance', path: '/employee/view-attendance' },
+        { icon: FileText, label: 'Apply Leave', path: '/employee/apply-leave' },
+        { icon: Wallet, label: 'Salary', path: '/employee/salary' },
+        { icon: UserCircle, label: 'Profile', path: '/employee/profile' },
+        { icon: BookOpen, label: 'Rules', path: '/employee/rules' },
+    ];
+
+    return (
+        <div className="min-h-screen bg-background text-foreground">
+            <div className="flex h-screen max-w-app mx-auto bg-background text-foreground overflow-hidden font-sans relative">
+                {/* Mobile Sidebar Overlay */}
+                {isSidebarOpen && (
+                    <div
+                        className="fixed inset-0 bg-background/80 backdrop-blur-sm z-40 lg:hidden"
+                        onClick={() => setIsSidebarOpen(false)}
+                    />
+                )}
+
+                {/* Sidebar */}
+                <aside
+                    className={`fixed inset-y-0 left-0 z-50 w-64 border-r border-border bg-card transition-transform duration-300 lg:static lg:translate-x-0 flex flex-col ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
+                        }`}
+                >
+                    <div className="p-6 flex items-center justify-between border-b border-border/40">
+                        <div className="flex items-center gap-2">
+                            <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center font-bold text-primary-foreground shadow-lg shadow-primary/20">
+                                E
+                            </div>
+                            <span className="font-bold text-xl tracking-tight text-foreground">Employee Portal</span>
+                        </div>
+                        <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setIsSidebarOpen(false)}>
+                            <X size={20} />
+                        </Button>
+                    </div>
+
+                    <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+                        {navItems.map((item) => (
+                            <NavLink
+                                key={item.label}
+                                to={item.path}
+                                onClick={() => setIsSidebarOpen(false)}
+                                className={({ isActive }) =>
+                                    `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group ${isActive
+                                        ? 'bg-primary text-primary-foreground shadow-md shadow-primary/20'
+                                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                                    }`
+                                }
+                            >
+                                <item.icon size={18} />
+                                {item.label}
+                            </NavLink>
+                        ))}
+                    </nav>
+
+                    <div className="p-4 border-t border-border/40">
+                        <div className="flex items-center gap-3 mb-3 px-1">
+                            <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
+                                {user?.name?.charAt(0) || 'E'}
+                            </div>
+                            <div className="flex flex-col min-w-0">
+                                <span className="text-sm font-semibold text-foreground truncate">{user?.name || 'Employee'}</span>
+                                <span className="text-xs text-muted-foreground truncate">{user?.department || 'Staff'}</span>
+                            </div>
+                        </div>
+                        <Button
+                            variant="ghost"
+                            className="w-full justify-start text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                            onClick={handleLogout}
+                        >
+                            <LogOut size={18} className="mr-2" />
+                            Logout
+                        </Button>
+                    </div>
+                </aside>
+
+                {/* Main Content */}
+                <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+                    {/* Decorative Background for Main Content */}
+                    <div className="absolute top-0 left-0 w-full h-full pointer-events-none -z-10 opacity-30">
+                        <div className="absolute top-[10%] right-[10%] w-[30%] h-[30%] bg-emerald-500/5 blur-[120px] rounded-full" />
+                        <div className="absolute bottom-[10%] left-[10%] w-[20%] h-[20%] bg-blue-500/5 blur-[100px] rounded-full" />
+                    </div>
+
+                    {/* Topbar */}
+                    <header className="h-16 border-b border-border bg-background/50 backdrop-blur-md flex items-center justify-between px-4 sm:px-6 sticky top-0 z-10 w-full">
+                        <div className="w-full flex items-center justify-between">
+                            <div className="flex items-center gap-4 w-1/2 sm:w-1/3">
+                                <Button variant="ghost" size="icon" className="lg:hidden -ml-2" onClick={() => setIsSidebarOpen(true)}>
+                                    <Menu size={20} />
+                                </Button>
+                                <div className="relative w-full max-w-sm hidden sm:block">
+                                    <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                    <Input
+                                        placeholder="Search..."
+                                        className="pl-10 bg-muted/50 border-transparent focus:bg-background focus:border-input h-10 rounded-xl text-foreground placeholder:text-muted-foreground transition-all"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-4">
+                                <div className="relative" ref={dropdownRef}>
+                                    <Button 
+                                        variant="ghost" 
+                                        size="icon" 
+                                        className="relative text-muted-foreground hover:text-foreground rounded-full"
+                                        onClick={() => setIsNotificationOpen(!isNotificationOpen)}
+                                    >
+                                        <Bell size={20} />
+                                        {notifications.some(n => !n.isRead) && (
+                                            <span className="absolute top-2 right-2.5 h-2 w-2 bg-primary rounded-full" />
+                                        )}
+                                    </Button>
+
+                                    {/* Notifications Dropdown */}
+                                    {isNotificationOpen && (
+                                        <div className="absolute right-0 mt-2 w-80 bg-card border border-border shadow-lg rounded-xl z-50 overflow-hidden">
+                                            <div className="p-3 border-b border-border/40 bg-muted/30 flex justify-between items-center">
+                                                <h4 className="text-sm font-semibold text-foreground">Notifications</h4>
+                                                {notifications.some(n => !n.isRead) && (
+                                                    <button 
+                                                        onClick={handleMarkAllAsRead} 
+                                                        className="text-xs text-primary hover:underline font-medium"
+                                                    >
+                                                        Mark all read
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="max-h-80 overflow-y-auto">
+                                                {notifications.length === 0 ? (
+                                                    <p className="text-sm text-muted-foreground p-4 text-center">No notifications yet</p>
+                                                ) : (
+                                                    notifications.map(n => (
+                                                        <div 
+                                                            key={n._id} 
+                                                            onClick={() => {
+                                                                handleMarkAsRead(n._id);
+                                                                if (n.link) {
+                                                                    navigate(n.link);
+                                                                    setIsNotificationOpen(false);
+                                                                }
+                                                            }}
+                                                            className={`p-3 border-b border-border/40 hover:bg-muted/30 cursor-pointer transition-colors ${!n.isRead ? 'bg-primary/5 font-semibold' : ''}`}
+                                                        >
+                                                            <div className="flex justify-between items-start gap-1">
+                                                                <p className="text-xs font-semibold text-foreground">{n.title}</p>
+                                                                {!n.isRead && (
+                                                                    <span className="h-1.5 w-1.5 bg-primary rounded-full shrink-0 mt-1" />
+                                                                )}
+                                                            </div>
+                                                            <p className="text-xs text-muted-foreground mt-1 leading-normal">{n.message}</p>
+                                                            <p className="text-[10px] text-muted-foreground mt-1.5">
+                                                                {new Date(n.createdAt).toLocaleDateString()} {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                            </p>
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="h-9 w-9 rounded-full bg-gradient-to-tr from-primary to-accent p-[2px]">
+                                    <div className="h-full w-full rounded-full bg-card overflow-hidden">
+                                        <img src={`https://ui-avatars.com/api/?name=${user?.name || 'Employee'}&background=random`} alt="Employee" className="h-full w-full object-cover" />
+                                    </div>
+                                </div>
+                                <div className="hidden md:block">
+                                    <p className="text-sm font-bold leading-none text-foreground">{user?.name || 'Employee'}</p>
+                                    <p className="text-xs text-muted-foreground font-medium">{user?.department || 'Staff'}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Page Content */}
+                    <main className="flex-1 overflow-y-auto p-4 sm:p-6 scroll-smooth">
+                        <Outlet />
+                    </main>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default EmployeeLayout;
