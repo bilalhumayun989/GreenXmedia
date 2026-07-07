@@ -8,7 +8,7 @@ import { Switch } from '../../components/ui/Switch';
 import { Mail, User, Lock, Save, Loader2, Building, Wifi, ScanFace, Trash2 } from 'lucide-react';
 
 const AdminSettings = () => {
-    const { adminUser: user, checkAuth } = useAuth();
+    const { adminUser: user, updateEmployeeUser } = useAuth();
     const [isLoading, setIsLoading] = useState(false);
     const [faceLoading, setFaceLoading] = useState(false);
     const [ipStatus, setIpStatus] = useState(null);
@@ -96,7 +96,18 @@ const AdminSettings = () => {
             const data = await res.json();
             if (res.ok) {
                 alert('Face data removed successfully.');
-                await checkAuth(); // refresh user context so faceEnrolled updates
+                // Update admin user in context so faceEnrolled badge updates instantly
+                const updatedAdmin = { ...user, faceEnrolled: false, faceDescriptors: [] };
+                updateEmployeeUser && updateEmployeeUser(updatedAdmin); // won't apply for admin slot
+                // For admin, patch the stored admin data directly via localStorage key
+                try {
+                    const stored = JSON.parse(localStorage.getItem('hrms_admin') || '{}');
+                    stored.faceEnrolled = false;
+                    stored.faceDescriptors = [];
+                    localStorage.setItem('hrms_admin', JSON.stringify(stored));
+                } catch (_) {}
+                // Force a re-render by reloading user from localStorage via a quick page reload
+                window.location.reload();
             } else {
                 alert(data.message || 'Failed to remove face data.');
             }

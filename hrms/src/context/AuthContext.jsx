@@ -106,6 +106,12 @@ export const AuthProvider = ({ children }) => {
         }
     };
 
+    // ── Update admin user data ─────────────────────────────────
+    const updateAdminUser = (userData) => {
+        setAdminUser(userData);
+        save('hrms_admin', userData);
+    };
+
     // ── Update employee user data ──────────────────────────────
     const updateEmployeeUser = (userData) => {
         setEmployeeUser(userData);

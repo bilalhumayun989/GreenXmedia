@@ -31,6 +31,10 @@ const { protect, admin, requirePermission } = require('../middleware/authMiddlew
 router.get('/face-descriptors', protect, getFaceDescriptors); // Must be authenticated
 router.post('/face-checkin', protect, faceCheckIn); // Must be authenticated — only own userId allowed
 
+// Self face removal — registered BEFORE router.use(protect) and BEFORE /:userId wildcard
+// so Express matches this exact path and never confuses it with /enroll-face/:userId
+router.delete('/enroll-face-self', protect, unenrollOwnFace);
+
 router.use(protect); // All attendance routes below are protected
 
 // Employee routes
@@ -58,7 +62,6 @@ router.put('/:id', admin, requirePermission('attendance', 'edit'), updateAttenda
 // Face Recognition routes
 router.post('/enroll-face', enrollFace);
 router.delete('/enroll-face-all', admin, unenrollAllFaces);
-router.delete('/enroll-face-self', protect, unenrollOwnFace);      // any authenticated user removes own face
 router.delete('/enroll-face/:userId', admin, unenrollFace);
 
 module.exports = router;
