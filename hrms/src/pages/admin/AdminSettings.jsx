@@ -8,7 +8,7 @@ import { Switch } from '../../components/ui/Switch';
 import { Mail, User, Lock, Save, Loader2, Building, Wifi, ScanFace, Trash2 } from 'lucide-react';
 
 const AdminSettings = () => {
-    const { adminUser: user, updateEmployeeUser } = useAuth();
+    const { adminUser: user, updateAdminUser } = useAuth();
     const [isLoading, setIsLoading] = useState(false);
     const [faceLoading, setFaceLoading] = useState(false);
     const [ipStatus, setIpStatus] = useState(null);
@@ -88,26 +88,18 @@ const AdminSettings = () => {
         if (!window.confirm('Remove your face data? You will need to re-enroll to use face attendance again.')) return;
         setFaceLoading(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/attendance/enroll-face-self`, {
+            // Use the existing admin-scoped route DELETE /enroll-face/:userId
+            // This works on all backend versions (including older VPS deployments)
+            const res = await fetch(`${API_BASE_URL}/attendance/enroll-face/${user._id}`, {
                 method: 'DELETE',
                 headers: { 'X-Role-Context': 'Admin' },
                 credentials: 'include'
             });
             const data = await res.json();
             if (res.ok) {
-                alert('Face data removed successfully.');
-                // Update admin user in context so faceEnrolled badge updates instantly
+                // Update admin state in context + localStorage immediately — no reload needed
                 const updatedAdmin = { ...user, faceEnrolled: false, faceDescriptors: [] };
-                updateEmployeeUser && updateEmployeeUser(updatedAdmin); // won't apply for admin slot
-                // For admin, patch the stored admin data directly via localStorage key
-                try {
-                    const stored = JSON.parse(localStorage.getItem('hrms_admin') || '{}');
-                    stored.faceEnrolled = false;
-                    stored.faceDescriptors = [];
-                    localStorage.setItem('hrms_admin', JSON.stringify(stored));
-                } catch (_) {}
-                // Force a re-render by reloading user from localStorage via a quick page reload
-                window.location.reload();
+                updateAdminUser(updatedAdmin);
             } else {
                 alert(data.message || 'Failed to remove face data.');
             }
