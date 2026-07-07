@@ -63,6 +63,8 @@ const MarkAttendance = () => {
     const validationCountRef = useRef(0);
     const lastVocalRef = useRef(0);
     const scanLoopActive = useRef(false);
+    const tabHiddenRef = useRef(false); // tracks tab visibility for scan loop gating
+    const modelsLoadingRef = useRef(false); // prevents concurrent loadModels calls
 
     // ── Helpers ──────────────────────────────────────────────────────
     const speakOnce = (text) => {
@@ -139,18 +141,35 @@ const MarkAttendance = () => {
 
     // ── Load models then start camera ─────────────────────────────────
     const loadModels = useCallback(async () => {
+        if (modelsLoadingRef.current) return; // prevent concurrent calls
+        modelsLoadingRef.current = true;
         try {
-            setFaceStatus('Loading AI models…');
-            await Promise.all([
-                faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
-                faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
-                faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
-                faceapi.nets.faceRecognitionNet.loadFromUri('/models')
-            ]);
+            setFaceStatus('Loading AI models… (1/4)');
+            // Sequential loading — keeps browser responsive between each model
+            // Parallel Promise.all blocks the main thread and causes "not responding" on tab switch
+            await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+            if (tabHiddenRef.current) { modelsLoadingRef.current = false; return; } // aborted
+            setFaceStatus('Loading AI models… (2/4)');
+            await faceapi.nets.ssdMobilenetv1.loadFromUri('/models');
+            if (tabHiddenRef.current) { modelsLoadingRef.current = false; return; }
+            setFaceStatus('Loading AI models… (3/4)');
+            await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
+            if (tabHiddenRef.current) { modelsLoadingRef.current = false; return; }
+            setFaceStatus('Loading AI models… (4/4)');
+            await faceapi.nets.faceRecognitionNet.loadFromUri('/models');
+
+            modelsLoadingRef.current = false;
             setModelsLoaded(true);
-            setFaceStatus('Camera starting…');
-            await startCamera();
+
+            // Only start camera if tab is visible
+            if (!tabHiddenRef.current) {
+                setFaceStatus('Camera starting…');
+                await startCamera();
+            } else {
+                setFaceStatus('Models ready. Camera will start when you return to this tab.');
+            }
         } catch (err) {
+            modelsLoadingRef.current = false;
             setFaceStatus('Error loading AI models: ' + err.message);
         }
     }, [startCamera]);
@@ -368,6 +387,13 @@ const MarkAttendance = () => {
 
         const loop = async () => {
             if (!scanLoopActive.current) return;
+
+            // ── Tab hidden guard — skip ALL faceapi work when tab is not visible ──
+            // This prevents WASM queue buildup that causes "page not responding"
+            if (tabHiddenRef.current) {
+                timer = setTimeout(loop, 500); // poll slowly while hidden
+                return;
+            }
 
             // Ensure video is still attached (fixes "camera not detecting" after enrollment)
             ensureVideoAttached();
@@ -633,16 +659,24 @@ const MarkAttendance = () => {
         decide();
     }, [modelsLoaded, userReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // 4. Tab visibility — stop camera on hide, auto-restart on show
+    // 4. Tab visibility — gate scan loop immediately, stop/restart camera
     useEffect(() => {
         const onVisibility = () => {
             if (document.hidden) {
+                // Set ref FIRST — scan loop checks this at top of every tick
+                // This stops all faceapi WASM calls immediately, before camera even stops
+                tabHiddenRef.current = true;
                 stopCamera();
-            } else if (modelsLoaded) {
-                // Small delay to let browser settle after tab switch
-                setTimeout(() => startCamera(), 400);
+            } else {
+                tabHiddenRef.current = false;
+                if (modelsLoaded) {
+                    // Small delay to let browser settle after tab switch
+                    setTimeout(() => startCamera(), 300);
+                }
             }
         };
+        // Sync ref with current visibility state immediately on mount
+        tabHiddenRef.current = document.hidden;
         document.addEventListener('visibilitychange', onVisibility);
         return () => document.removeEventListener('visibilitychange', onVisibility);
     }, [modelsLoaded, stopCamera, startCamera]);
