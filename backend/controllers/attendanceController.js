@@ -758,9 +758,13 @@ const enrollFace = async (req, res) => {
         }
 
         // Block re-enrollment for non-admins — face is permanent once set
-        if (!isAdmin && user.faceEnrolled) {
+        // Check BOTH the flag AND the actual descriptors array for absolute certainty
+        const alreadyHasDescriptors = user.faceDescriptors && user.faceDescriptors.length > 0;
+        if (!isAdmin && (user.faceEnrolled || alreadyHasDescriptors)) {
+            console.warn(`🚫 Re-enrollment blocked for ${user.name} (${userId}) — faceEnrolled=${user.faceEnrolled}, descriptors=${user.faceDescriptors?.length || 0}`);
             return res.status(403).json({
                 success: false,
+                code: 'FACE_ALREADY_ENROLLED',
                 message: 'Face is already enrolled. Contact your admin to re-enroll.'
             });
         }
@@ -774,8 +778,8 @@ const enrollFace = async (req, res) => {
         }).select('_id name faceDescriptors');
 
         // Compare incoming face descriptors with all existing enrolled faces
-        // Lower threshold = stricter matching (0.6 = same person, 0.3 = identical face)
-        const FACE_MATCH_THRESHOLD = 0.35; // Strict threshold to prevent false positives
+        // Threshold 0.38 matches our live verification threshold for consistency
+        const FACE_MATCH_THRESHOLD = 0.38;
         
         let minDistance = Infinity;
         let closestUser = null;
@@ -971,6 +975,28 @@ const faceCheckIn = async (req, res) => {
     }
 };
 
+// @desc    Delete/Unenroll own face (any authenticated user — admin or employee)
+// @route   DELETE /api/attendance/enroll-face-self
+// @access  Private
+const unenrollOwnFace = async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        if (!user.faceEnrolled) {
+            return res.status(400).json({ success: false, message: 'No face data to remove.' });
+        }
+
+        user.faceDescriptors = [];
+        user.faceEnrolled = false;
+        await user.save();
+
+        res.json({ success: true, message: 'Your face data has been removed successfully.' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
 // @desc    Delete/Unenroll employee face
 // @route   DELETE /api/attendance/enroll-face/:userId
 // @access  Private/Admin
@@ -1152,6 +1178,7 @@ module.exports = {
     faceCheckIn,
     addCustomAttendance,
     unenrollFace,
+    unenrollOwnFace,
     unenrollAllFaces
 };
 

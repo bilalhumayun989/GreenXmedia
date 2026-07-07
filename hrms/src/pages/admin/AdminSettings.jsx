@@ -5,11 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../..
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Switch } from '../../components/ui/Switch';
-import { Mail, User, Lock, Save, Loader2, Building, Wifi } from 'lucide-react';
+import { Mail, User, Lock, Save, Loader2, Building, Wifi, ScanFace, Trash2 } from 'lucide-react';
 
 const AdminSettings = () => {
     const { adminUser: user, checkAuth } = useAuth();
     const [isLoading, setIsLoading] = useState(false);
+    const [faceLoading, setFaceLoading] = useState(false);
     const [ipStatus, setIpStatus] = useState(null);
     const [ipLoading, setIpLoading] = useState(false);
     const [formData, setFormData] = useState({
@@ -80,6 +81,29 @@ const AdminSettings = () => {
             alert('Connection error. Try again.');
         } finally {
             setIpLoading(false);
+        }
+    };
+
+    const handleRemoveOwnFace = async () => {
+        if (!window.confirm('Remove your face data? You will need to re-enroll to use face attendance again.')) return;
+        setFaceLoading(true);
+        try {
+            const res = await fetch(`${API_BASE_URL}/attendance/enroll-face-self`, {
+                method: 'DELETE',
+                headers: { 'X-Role-Context': 'Admin' },
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (res.ok) {
+                alert('Face data removed successfully.');
+                await checkAuth(); // refresh user context so faceEnrolled updates
+            } else {
+                alert(data.message || 'Failed to remove face data.');
+            }
+        } catch (err) {
+            alert('Connection error. Try again.');
+        } finally {
+            setFaceLoading(false);
         }
     };
 
@@ -345,6 +369,58 @@ const AdminSettings = () => {
                             <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
                                 <strong>Note:</strong> Before enabling IP restriction, ensure a Manager account has set the office IP from the Manager Dashboard.
                             </div>
+                        )}
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <ScanFace className="w-5 h-5 text-primary" /> Face Recognition Data
+                        </CardTitle>
+                        <CardDescription>Manage your enrolled face data used for attendance marking.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-start gap-3 flex-1">
+                                <div className={`p-2 rounded-lg mt-0.5 ${user?.faceEnrolled ? 'bg-emerald-500/10' : 'bg-muted'}`}>
+                                    <ScanFace className={`w-5 h-5 ${user?.faceEnrolled ? 'text-emerald-600' : 'text-muted-foreground'}`} />
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="font-medium text-foreground">Face Enrollment Status</p>
+                                    <p className="text-sm text-muted-foreground">
+                                        {user?.faceEnrolled
+                                            ? 'Your face is enrolled and used for attendance recognition.'
+                                            : 'No face data enrolled. Visit the Mark Attendance page to enroll.'}
+                                    </p>
+                                    <div className={`inline-block mt-1 px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                                        user?.faceEnrolled
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                            : 'bg-muted text-muted-foreground border-border/40'
+                                    }`}>
+                                        {user?.faceEnrolled ? '✓ Enrolled' : 'Not enrolled'}
+                                    </div>
+                                </div>
+                            </div>
+                            {user?.faceEnrolled && (
+                                <Button
+                                    variant="outline"
+                                    disabled={faceLoading}
+                                    onClick={handleRemoveOwnFace}
+                                    className="shrink-0 text-rose-600 border-rose-200 hover:bg-rose-50 hover:border-rose-400 transition-all font-semibold"
+                                >
+                                    {faceLoading
+                                        ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                        : <Trash2 className="w-4 h-4 mr-2" />
+                                    }
+                                    Remove Face Data
+                                </Button>
+                            )}
+                        </div>
+                        {user?.faceEnrolled && (
+                            <p className="mt-3 text-xs text-muted-foreground bg-muted/40 rounded-lg p-3 border border-border/30">
+                                After removing, your face data is permanently deleted. You will need to re-enroll from the Mark Attendance page before attendance can be marked again.
+                            </p>
                         )}
                     </CardContent>
                 </Card>

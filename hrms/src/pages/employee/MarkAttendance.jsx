@@ -12,14 +12,16 @@ const fmt12 = (t) => {
     return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
 };
 
-// ── Enrollment takes 5 diverse samples at different angles/distances ──
-const ENROLL_SAMPLES_NEEDED = 5;
-// Attendance verification: face must match 2 consecutive frames
-const VERIFY_FRAMES_NEEDED = 2;
-// Euclidean distance threshold — lower = stricter match
-const MATCH_THRESHOLD = 0.50;
-// Min ms between enrollment captures (ensures diverse samples)
-const ENROLL_CAPTURE_INTERVAL = 1200;
+// ── Enrollment takes 8 diverse samples at different angles/distances ──
+const ENROLL_SAMPLES_NEEDED = 8;
+// Attendance verification: must match this many CONSECUTIVE frames before acting
+// High value = much harder to spoof with a photo or wrong person
+const VERIFY_FRAMES_NEEDED = 5;
+// Strict euclidean distance threshold. face-api.js: same person ≈ 0.4–0.6, different ≈ 0.6+
+// 0.38 is tight enough to reject similar faces while accepting genuine matches
+const MATCH_THRESHOLD = 0.38;
+// Minimum ms between enrollment captures (forces diverse angles)
+const ENROLL_CAPTURE_INTERVAL = 1500;
 
 const MarkAttendance = () => {
     const { employeeUser, adminUser, updateEmployeeUser, refreshEmployeeFromServer } = useAuth();
@@ -187,7 +189,36 @@ const MarkAttendance = () => {
     // ── Save enrollment to server ─────────────────────────────────────
     const saveEnrollment = useCallback(async (samples) => {
         if (enrollSavingRef.current) return;
-        if (user?.faceEnrolled) { return; } // already enrolled, never re-enroll silently
+
+        // ── Hard guard: always re-check from server before saving ──────
+        // This prevents stale React state from allowing re-enrollment
+        try {
+            const checkRes = await fetch(`${API_BASE_URL}/attendance/face-descriptors`, {
+                headers: { 'X-Role-Context': 'Employee' },
+                credentials: 'include'
+            });
+            if (checkRes.ok) {
+                const checkData = await checkRes.json();
+                const me = (checkData.employees || []).find(
+                    e => e._id && user._id && e._id.toString() === user._id.toString()
+                );
+                if (me && me.faceDescriptors && me.faceDescriptors.length > 0) {
+                    // Face already enrolled on server — abort enrollment silently
+                    console.warn('⚠️ Server says face already enrolled. Aborting enrollment, loading descriptor.');
+                    enrollSamplesRef.current = [];
+                    enrollSavingRef.current = false;
+                    setEnrollProgress(0);
+                    const updatedUser = { ...user, faceEnrolled: true };
+                    setLocalUser(updatedUser);
+                    if (updateEmployeeUser) updateEmployeeUser(updatedUser);
+                    enrollModeRef.current = false;
+                    setEnrollModeState(false);
+                    await fetchMyDescriptor();
+                    return;
+                }
+            }
+        } catch (_) { /* network error during check — proceed to try enrollment */ }
+
         if (samples.length < ENROLL_SAMPLES_NEEDED) return;
 
         enrollSavingRef.current = true;
@@ -212,19 +243,28 @@ const MarkAttendance = () => {
                 if (updateEmployeeUser) updateEmployeeUser(updatedUser);
 
                 await fetchAttendanceStatus();
-                await fetchMyDescriptor(); // this sets enrollModeRef to false and loads descriptor
+                await fetchMyDescriptor(); // sets enrollModeRef to false and loads descriptor
                 if (isExpanded) setTimeout(() => setIsExpanded(false), 1500);
             } else {
                 if (d.code === 'FACE_ALREADY_ENROLLED') {
-                    setFaceStatus('❌ Face already registered to another account.');
-                    speakOnce('Face already registered to another account');
+                    // Someone already enrolled — stop immediately and load their descriptor
+                    setFaceStatus('⚠️ Face already registered. Loading your recognition data…');
+                    enrollSamplesRef.current = [];
+                    enrollSavingRef.current = false;
+                    setEnrollProgress(0);
+                    enrollModeRef.current = false;
+                    setEnrollModeState(false);
+                    const updatedUser = { ...user, faceEnrolled: true };
+                    setLocalUser(updatedUser);
+                    if (updateEmployeeUser) updateEmployeeUser(updatedUser);
+                    await fetchMyDescriptor();
                 } else {
                     setFaceStatus('❌ ' + (d.message || 'Enrollment failed. Please try again.'));
+                    enrollSamplesRef.current = [];
+                    enrollSavingRef.current = false;
+                    setEnrollProgress(0);
+                    setTimeout(() => setFaceStatus('Look at the camera. Enrollment will restart.'), 4000);
                 }
-                enrollSamplesRef.current = [];
-                enrollSavingRef.current = false;
-                setEnrollProgress(0);
-                setTimeout(() => setFaceStatus('Look at the camera. Enrollment will restart.'), 4000);
             }
         } catch (e) {
             setFaceStatus('❌ Connection error. Retrying enrollment…');
@@ -424,15 +464,19 @@ const MarkAttendance = () => {
 
             try {
                 const detection = await faceapi
-                    .detectSingleFace(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.45 }))
+                    .detectSingleFace(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.55 }))
                     .withFaceLandmarks()
                     .withFaceDescriptor();
 
                 if (!detection) {
                     setIsFaceDetected(false);
                     setIsFaceVerified(false);
-                    validationCountRef.current = 0;
-                    setFaceStatus('No face detected. Look at the camera.');
+                    if (validationCountRef.current > 0) {
+                        validationCountRef.current = 0; // reset streak — face left frame
+                        setFaceStatus('Face left frame. Streak reset. Look at the camera.');
+                    } else {
+                        setFaceStatus('No face detected. Look at the camera.');
+                    }
                     timer = setTimeout(loop, 100);
                     return;
                 }
@@ -446,19 +490,46 @@ const MarkAttendance = () => {
                 const cy = box.y + box.height / 2;
                 const centered = Math.abs(cx - vw / 2) < vw * 0.40 && Math.abs(cy - vh / 2) < vh * 0.45;
 
-                if (box.width < vw * 0.10) { validationCountRef.current = 0; setFaceStatus('Too far. Move closer.'); timer = setTimeout(loop, 80); return; }
-                if (box.width > vw * 0.85) { validationCountRef.current = 0; setFaceStatus('Too close. Move back.'); timer = setTimeout(loop, 80); return; }
-                if (score < 0.50) { validationCountRef.current = 0; setFaceStatus('Face not clear. Improve lighting.'); timer = setTimeout(loop, 80); return; }
-                if (!centered) { validationCountRef.current = 0; setFaceStatus('Center your face in the frame.'); timer = setTimeout(loop, 80); return; }
+                if (box.width < vw * 0.10) {
+                    validationCountRef.current = 0;
+                    setFaceStatus('Too far. Move closer.');
+                    timer = setTimeout(loop, 80); return;
+                }
+                if (box.width > vw * 0.85) {
+                    validationCountRef.current = 0;
+                    setFaceStatus('Too close. Move back.');
+                    timer = setTimeout(loop, 80); return;
+                }
+                if (score < 0.55) {
+                    validationCountRef.current = 0;
+                    setFaceStatus('Face not clear. Improve lighting.');
+                    timer = setTimeout(loop, 80); return;
+                }
+                if (!centered) {
+                    validationCountRef.current = 0;
+                    setFaceStatus('Center your face in the frame.');
+                    timer = setTimeout(loop, 80); return;
+                }
 
-                const distances = myDescriptorRef.current.map(saved => faceapi.euclideanDistance(detection.descriptor, saved));
+                // ── Strict identity verification ───────────────────────
+                // Compare against THIS user's stored descriptors only
+                // Use best (minimum) distance across all stored samples
+                const distances = myDescriptorRef.current.map(
+                    saved => faceapi.euclideanDistance(detection.descriptor, saved)
+                );
                 const bestDist = Math.min(...distances);
+
+                // Hard threshold: 0.38 — rejects lookalikes, different people, photos
                 const verified = bestDist <= MATCH_THRESHOLD;
 
                 if (verified) {
                     validationCountRef.current += 1;
-                    setFaceStatus(`Face matched! Hold still… (${validationCountRef.current}/${VERIFY_FRAMES_NEEDED})`);
+                    setFaceStatus(
+                        `Verifying identity… ${validationCountRef.current}/${VERIFY_FRAMES_NEEDED} ` +
+                        `(confidence: ${Math.round((1 - bestDist) * 100)}%)`
+                    );
 
+                    // Only act after VERIFY_FRAMES_NEEDED consecutive matched frames
                     if (validationCountRef.current >= VERIFY_FRAMES_NEEDED) {
                         validationCountRef.current = 0;
                         setIsFaceVerified(true);
@@ -468,9 +539,17 @@ const MarkAttendance = () => {
                         return;
                     }
                 } else {
+                    // Any non-match immediately resets the streak — no partial credit
+                    if (validationCountRef.current > 0) {
+                        console.log(`❌ Match broken at frame ${validationCountRef.current}. Dist: ${bestDist.toFixed(3)}`);
+                    }
                     validationCountRef.current = 0;
                     setIsFaceVerified(false);
-                    setFaceStatus(bestDist < 0.65 ? 'Face partially matched. Hold steady.' : 'Face not recognized. Ensure only you are visible.');
+                    if (bestDist < 0.55) {
+                        setFaceStatus('Face looks similar but not matched. Hold still and face forward.');
+                    } else {
+                        setFaceStatus('Face not recognized. Are you the registered user?');
+                    }
                 }
             } catch (e) {
                 console.warn('Scan error:', e);
@@ -511,19 +590,48 @@ const MarkAttendance = () => {
     }, [userReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // 3. Once models loaded + user ready: decide enroll vs verify
+    // Always re-check server state — never rely purely on stale React user object
     useEffect(() => {
         if (!modelsLoaded || !userReady) return;
-        if (user?.faceEnrolled) {
-            enrollModeRef.current = false;
-            setEnrollModeState(false);
-            fetchMyDescriptor();
-        } else {
-            enrollModeRef.current = true;
-            setEnrollModeState(true);
-            setIsExpanded(true);
-            setFaceStatus('📸 Face enrollment required. Look at the camera.');
-        }
-    }, [modelsLoaded, userReady, user?.faceEnrolled]); // eslint-disable-line react-hooks/exhaustive-deps
+
+        const decide = async () => {
+            // Always fetch fresh server state for faceEnrolled check
+            let serverFaceEnrolled = user?.faceEnrolled || false;
+            try {
+                const res = await fetch(`${API_BASE_URL}/attendance/face-descriptors`, {
+                    headers: { 'X-Role-Context': 'Employee' },
+                    credentials: 'include'
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const me = (data.employees || []).find(
+                        e => e._id && user?._id && e._id.toString() === user._id.toString()
+                    );
+                    serverFaceEnrolled = !!(me && me.faceDescriptors && me.faceDescriptors.length > 0);
+
+                    if (serverFaceEnrolled && !user?.faceEnrolled) {
+                        // Server says enrolled but local state doesn't — sync it
+                        const updatedUser = { ...user, faceEnrolled: true };
+                        setLocalUser(updatedUser);
+                        if (updateEmployeeUser) updateEmployeeUser(updatedUser);
+                    }
+                }
+            } catch (_) { /* use local state as fallback */ }
+
+            if (serverFaceEnrolled) {
+                enrollModeRef.current = false;
+                setEnrollModeState(false);
+                fetchMyDescriptor();
+            } else {
+                enrollModeRef.current = true;
+                setEnrollModeState(true);
+                setIsExpanded(true);
+                setFaceStatus('📸 Face enrollment required. Look at the camera.');
+            }
+        };
+
+        decide();
+    }, [modelsLoaded, userReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // 4. Tab visibility — stop camera on hide, auto-restart on show
     useEffect(() => {
