@@ -47,8 +47,8 @@ const Rules = () => {
                 <RuleSection icon={Clock} title="Shift Timings" color="border-blue-400">
                     <Rule icon={CheckCircle2} iconColor="text-emerald-500" text="Standard shift hours are 9:00 AM to 5:00 PM (as configured by your admin)." />
                     <Rule icon={CheckCircle2} iconColor="text-emerald-500" text="A grace period of 15 minutes is allowed for late arrivals. Arriving within grace time is considered On Time." />
-                    <Rule icon={AlertTriangle} iconColor="text-amber-500" text="Arriving after the grace period will be marked as Late. Late attendance results in a half-day salary deduction." />
-                    <Rule icon={XCircle} iconColor="text-red-500" text="Failing to mark attendance at all will be recorded as Absent. Absent days result in a full-day salary deduction." />
+                    <Rule icon={AlertTriangle} iconColor="text-amber-500" text="Arriving after the grace period will be marked as Late and may affect your salary." />
+                    <Rule icon={XCircle} iconColor="text-red-500" text="Failing to mark attendance at all will be recorded as Absent and will affect your salary." />
                 </RuleSection>
 
                 <RuleSection icon={Calendar} title="Attendance & Leaves" color="border-emerald-400">
@@ -61,11 +61,10 @@ const Rules = () => {
                 </RuleSection>
 
                 <RuleSection icon={DollarSign} title="Salary & Payroll" color="border-violet-400">
-                    <Rule icon={CheckCircle2} iconColor="text-emerald-500" text="Salary is calculated based on a 30-day month, regardless of whether the month has 28, 29, 31 days." />
-                    <Rule icon={CheckCircle2} iconColor="text-emerald-500" text="Daily rate = Monthly Salary ÷ 30. This applies uniformly for all days including public holidays." />
-                    <Rule icon={AlertTriangle} iconColor="text-amber-500" text="Late arrival penalty: You will receive 0.5× (half) of the daily rate for that day." />
-                    <Rule icon={XCircle} iconColor="text-red-500" text="Absent penalty: You will receive 0× (zero) salary for that day — a full day is deducted." />
-                    <Rule icon={Info} iconColor="text-blue-500" text="Payroll is generated automatically on the 1st of each month for the previous month's attendance." />
+                    <Rule icon={CheckCircle2} iconColor="text-emerald-500" text="Salary is processed monthly based on your attendance record." />
+                    <Rule icon={AlertTriangle} iconColor="text-amber-500" text="Late arrivals will result in a salary deduction for that day." />
+                    <Rule icon={XCircle} iconColor="text-red-500" text="Absent days will result in no pay for that day." />
+                    <Rule icon={Info} iconColor="text-blue-500" text="Payroll is generated automatically on the 1st of each month." />
                     <Rule icon={Info} iconColor="text-blue-500" text="You can view your payroll details in the 'Salary' section of this portal." />
                 </RuleSection>
 

@@ -68,9 +68,8 @@ const EmployeeSalary = () => {
                             <h3 className="font-semibold text-blue-900 mb-1">How Payroll Works</h3>
                             <div className="text-sm text-blue-800 space-y-1">
                                 <p>• Payroll is <strong>auto-generated on the 1st of each month</strong></p>
-                                <p>• <strong>Daily Rate</strong> = Monthly Salary ÷ 30</p>
-                                <p>• <strong>Late arrivals</strong> = half-day pay deducted</p>
-                                <p>• <strong>Absences</strong> = no pay for that day</p>
+                                <p>• Late arrivals will result in a salary deduction for that day</p>
+                                <p>• Absences will result in no pay for that day</p>
                             </div>
                         </div>
                     </div>

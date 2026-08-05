@@ -10,6 +10,6 @@ router.get('/stats', protect, getLeaveStats);
 
 // Admin routes
 router.get('/all', protect, admin, getAllLeaves);
-router.put('/:d/status', protect, admin, updateLeaveStatus);
+router.put('/:id/status', protect, admin, updateLeaveStatus);
 
 module.exports = router;

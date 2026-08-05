@@ -33,19 +33,21 @@ const protect = async (req, res, next) => {
             const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
             req.user = await User.findById(decoded.id).select('-password');
 
-            // Attach permissions to req.user
-            if (req.user) {
-                if (req.user.role === 'Admin') {
-                    // Admin gets all permissions
-                    req.user.permissions = ALL_PERMISSIONS;
-                } else {
-                    // Regular employee
-                    req.user.permissions = null;
-                }
-
-                // TENANCY: Attach scoped adminId to the request for easy filtering
-                req.adminId = req.user.role === 'Admin' ? req.user._id : req.user.adminId;
+            if (!req.user) {
+                return res.status(401).json({ message: 'Not authorized, user not found' });
             }
+
+            // Attach permissions to req.user
+            if (req.user.role === 'Admin') {
+                // Admin gets all permissions
+                req.user.permissions = ALL_PERMISSIONS;
+            } else {
+                // Regular employee
+                req.user.permissions = null;
+            }
+
+            // TENANCY: Attach scoped adminId to the request for easy filtering
+            req.adminId = req.user.role === 'Admin' ? req.user._id : req.user.adminId;
 
             next();
         } catch (error) {
